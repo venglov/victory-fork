@@ -1,0 +1,22 @@
+name: Indirect barrier benchmark
+
+on:
+  push:
+    branches: [ci/indirect-bench]
+
+jobs:
+  bench:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Adapter
+        shell: pwsh
+        run: Get-CimInstance Win32_VideoController | Format-List Name, DriverVersion | Out-String
+      - name: Benchmark (three times)
+        run: |
+          cargo test -p victory-gpu --release --locked --lib indirect::bench -- --ignored --nocapture
+          cargo test -p victory-gpu --release --locked --lib indirect::bench -- --ignored --nocapture
+          cargo test -p victory-gpu --release --locked --lib indirect::bench -- --ignored --nocapture
