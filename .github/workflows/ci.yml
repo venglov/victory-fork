@@ -25,6 +25,7 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       # main fails three lints of its own (not this change): let the tests run.
+      # Tests one at a time: main's suite can crash in parallel (#970).
       - name: Clippy
         continue-on-error: true
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -33,4 +34,4 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       # Includes xtask's repository_passes_policy, the asset-policy check.
       - name: Tests
-        run: cargo test --workspace --locked --no-fail-fast
+        run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
