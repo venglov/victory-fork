@@ -2992,16 +2992,19 @@ impl State {
             .as_ref()
             .filter(|w| same(w) && offset >= w.base)
             .filter(|w| (offset - w.base) % u64::from(w.step) == 0 && (offset - w.base) / u64::from(w.step) < u64::from(w.records))
-            .map(|w| (w.scratch.clone(), offset - w.base, w.step));
+            .map(|w| (w.scratch.clone(), offset - w.base, w.step, w.records > 1));
         let (bounded, at) = match hit {
-            Some((scratch, at, step)) => {
+            Some((scratch, at, step, ahead)) => {
                 // Diagnostics of windows: the record clamped again and
-                // compared (`crate::indirect::window_check`).
+                // compared (`crate::indirect::window_check`), by the rules
+                // its window was clamped by (ahead for more than one
+                // record, as below).
                 if crate::indirect::window_check()
                     && crate::indirect::check_hit(
                         list,
                         (&args.buffer, offset),
                         (kind, step),
+                        ahead,
                         &scratch,
                         at,
                     )

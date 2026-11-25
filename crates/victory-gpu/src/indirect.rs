@@ -498,12 +498,17 @@ fn record_clamp_as(
 /// `VICTORY_INDIRECT_WINDOW=1`; off by default). A window clamps its
 /// records once, ahead of their draws; if anything wrote a record between
 /// the window's clamp and its draw, the draw reads the old one. The check
-/// clamps the record again just before the draw (into a buffer of its own,
-/// charging a budget of its own) and compares the two on the card: the
-/// counts are logged ("window check"), and the first record that differs in
-/// each run of a list is named. For telling whether windows can be trusted
-/// in a scene before they are on by default; it costs a clamp and a compare
-/// per window draw.
+/// clamps the record again just before the draw, by the rules the window
+/// clamped it by (into a buffer of its own, charging a budget of its own),
+/// and compares the two on the card: the counts are logged ("window
+/// check"), and the first record that differs in each run of a list is
+/// named. For telling whether windows can be trusted in a scene before they
+/// are on by default; it costs a clamp and a compare per window draw.
+///
+/// It sees what was written to the card's copy of the arguments. A draw
+/// served from a window brings nothing up to date, so a write of the
+/// title's that has not reached the card's copy is old in both clamps and
+/// compares equal.
 pub(crate) fn window_check() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -620,13 +625,18 @@ static CHECKED: [std::sync::atomic::AtomicU64; 2] =
 
 /// [`window_check`] for a draw served from a window: the record of `kind`
 /// at `src`, `step` bytes long, which the window clamped into `scratch` at
-/// `at`, is clamped again into the list's check buffer and compared. Runs
-/// compute work of ours, so the caller binds its pipeline again after it.
-/// False if nothing was recorded.
+/// `at`, is clamped again into the list's check buffer and compared.
+/// `ahead`: the window was clamped by [`bound_ahead`] (several records), not
+/// [`bound`] (one record, clamped alone). The rules differ for a record that
+/// asks for more than can run, which `bound_ahead` leaves empty and `bound`
+/// cuts down; clamped again by the other rules, such a record would differ
+/// with nothing having written it. Runs compute work of ours, so the caller
+/// binds its pipeline again after it. False if nothing was recorded.
 pub(crate) fn check_hit(
     list: &HostList,
     src: (&ID3D12Resource, u64),
     (kind, step): (u32, u32),
+    ahead: bool,
     scratch: &ID3D12Resource,
     at: u64,
 ) -> bool {
@@ -679,7 +689,7 @@ pub(crate) fn check_hit(
     // (common before and after every check).
     let common = D3D12_RESOURCE_STATE_COMMON;
     let spec = (kind, step, 1);
-    if !record_clamp_as(c, &list.list, (&check.args, common), budget, src, None, spec, true) {
+    if !record_clamp_as(c, &list.list, (&check.args, common), budget, src, None, spec, ahead) {
         return false;
     }
     let args = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
@@ -1849,7 +1859,7 @@ void main() {
         let spec = (KIND_DISPATCH, STEP, records.len() as u32);
         let scratch = bound_ahead(&list, (&src, 0), spec).unwrap();
         // Record 0: nothing wrote it.
-        assert!(check_hit(&list, (&src, 0), (KIND_DISPATCH, STEP), &scratch, 0));
+        assert!(check_hit(&list, (&src, 0), (KIND_DISPATCH, STEP), true, &scratch, 0));
         // Record 1 is written on the card after the window's clamp.
         let read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         // SAFETY: an open list; `src` was read by the clamp (promoted to a
@@ -1860,7 +1870,7 @@ void main() {
             list.list.ResourceBarrier(&[transition(&src, D3D12_RESOURCE_STATE_COPY_DEST, read)]);
         }
         let at = u64::from(STEP);
-        assert!(check_hit(&list, (&src, at), (KIND_DISPATCH, STEP), &scratch, at));
+        assert!(check_hit(&list, (&src, at), (KIND_DISPATCH, STEP), true, &scratch, at));
         list.close();
         assert_eq!(host.log_messages(), None, "the debug layer found an error");
         host.execute(&[&list]);
@@ -1869,6 +1879,53 @@ void main() {
         assert_eq!((checked, differed), (2, 1), "two checks, the written record differs");
         assert_eq!(window[..3], [5, 1, 1], "as the window clamped it");
         assert_eq!(fresh[..3], [11, 2, 1], "as it is now");
+    }
+
+    /// The window check of a window of one record, which `crate::draw`
+    /// clamps alone ([`bound`]) and serves again when the title draws the
+    /// same record again: a record of more instances than can run is cut
+    /// down, and checked by the same rules it compares equal. Checked by a
+    /// window's rules ahead of the draws, which leave such a record empty,
+    /// it would differ with nothing having written it (as an RTX 5080's run
+    /// reported: `window=[16777216, 1, 0, 0]`, `fresh=[0, 0, 0, 0]`).
+    #[test]
+    fn host_list_window_check_of_one_record_uses_its_rules() {
+        let Some(host) = super::host() else {
+            return;
+        };
+        let Ok(list) = host.new_list() else {
+            return;
+        };
+        let _ = host.log_messages();
+        const KIND_DRAW: u32 = 0;
+        const STRIDE: u32 = 16;
+        // Three vertices, all the instances there are.
+        let record = [3u32, u32::MAX, 0, 0];
+        let Some((src, src_ptr)) = host.shared_buffer(u64::from(STRIDE)) else {
+            return;
+        };
+        // SAFETY: a mapped buffer of one record; nothing runs yet.
+        unsafe { std::ptr::copy_nonoverlapping(record.as_ptr().cast::<u8>(), src_ptr, 16) };
+        let scratch = bound(&list, (&src, 0), None, (KIND_DRAW, STRIDE, 1)).unwrap();
+        // The draw served again from the window: its own rules.
+        assert!(check_hit(&list, (&src, 0), (KIND_DRAW, STRIDE), false, &scratch, 0));
+        // The rules of a window clamped ahead, which the check used for
+        // every window before.
+        assert!(check_hit(&list, (&src, 0), (KIND_DRAW, STRIDE), true, &scratch, 0));
+        list.close();
+        assert_eq!(host.log_messages(), None, "the debug layer found an error");
+        host.execute(&[&list]);
+        let (checked, differed, window, fresh) = list.window_check().unwrap().take();
+        list.reset();
+        // 2^26 vertex instances at most: 3 vertices, 22,369,621 instances.
+        let cut: [u32; 4] = [3, (1 << 26) / 3, 0, 0];
+        assert_eq!(window[..4], cut, "clamped alone, the record is cut down");
+        assert_eq!(
+            (checked, differed),
+            (2, 1),
+            "by its own rules the record compares equal; only the other rules differ"
+        );
+        assert_eq!(fresh[..4], [0, 0, 0, 0], "a window's rules ahead leave the record empty");
     }
 
     /// Records the dispatch records `groups` (three words each, `step`
