@@ -1,0 +1,23 @@
+name: Debug layer (indirect)
+
+on:
+  push:
+    branches: [ci/window-check-own-rules]
+
+jobs:
+  debug-layer:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Graphics Tools (the D3D12 debug layer)
+        shell: pwsh
+        run: |
+          Add-WindowsCapability -Online -Name "Tools.Graphics.DirectX~~~~0.0.1.0" | Out-String
+          "d3d12SDKLayers.dll present: " + (Test-Path "$env:WINDIR\System32\d3d12SDKLayers.dll")
+      - name: Indirect tests under the debug layer
+        env:
+          VICTORY_D3D12_DEBUG: "1"
+        run: 'cargo test -p victory-gpu --features diagnostics --locked indirect:: -- --test-threads=1 --nocapture'
