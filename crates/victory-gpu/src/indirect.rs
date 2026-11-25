@@ -1930,3 +1930,41 @@ void main() {
 /// The benchmark of the clamp and its barriers (ignored by default).
 #[cfg(test)]
 mod bench;
+
+/// Experiment branch only (not proposed): the debug layer is on, and the
+/// host-list tests' check (messages read after the list closes, before the
+/// submission) does see a wrong barrier recorded into a host list.
+#[cfg(test)]
+mod debug_layer_control {
+    use windows::Win32::Graphics::Direct3D12::*;
+
+    #[test]
+    fn debug_layer_catches_a_wrong_before_state_in_a_host_list() {
+        if std::env::var_os("VICTORY_D3D12_DEBUG").is_none() {
+            return;
+        }
+        let host = crate::host::host().expect("a host device");
+        let _ = host.log_messages();
+        let list = host.new_list().unwrap();
+        let buffer = host.uav_buffer(64 << 10).unwrap();
+        // SAFETY: an open host list and a live buffer.
+        unsafe {
+            list.list.ResourceBarrier(&[crate::host::transition(
+                &buffer,
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            )]);
+            // Wrong: the buffer is in UNORDERED_ACCESS now.
+            list.list.ResourceBarrier(&[crate::host::transition(
+                &buffer,
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            )]);
+        }
+        list.close();
+        let first = host.log_messages();
+        eprintln!("debug layer's first error: {first:?}");
+        assert!(first.is_some(), "the debug layer did not report the wrong before state");
+        list.reset();
+    }
+}
